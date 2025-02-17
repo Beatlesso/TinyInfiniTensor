@@ -10,7 +10,17 @@ Shape infer_broadcast(const Shape &A, const Shape &B) {
     // REF: https://github.com/onnx/onnx/blob/main/docs/Broadcasting.md
     // =================================== 作业 ===================================
     
-    return {};
+    int len_a = A.size(), len_b = B.size();
+    auto res = Shape(std::max(len_a, len_b));
+    for(int i = len_a - 1, j = len_b - 1 ; i >= 0 || j >= 0 ; i -- , j --)
+    {
+        int a = (i >= 0 ? A[i] : 1);
+        int b = (j >= 0 ? B[j] : 1);
+        if(a == b) res[std::max(i, j)] = a;
+        else if(a == 1 || b == 1) res[std::max(i, j)] = std::max(a, b);
+        else return{}; // 错误
+    }
+    return res;
 }
 
 int get_real_axis(const int &axis, const int &rank) {

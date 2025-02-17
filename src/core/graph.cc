@@ -1,4 +1,7 @@
 #include "core/graph.h"
+#include "core/op_type.h"
+#include "operators/matmul.h"
+#include "operators/transpose.h"
 #include <algorithm>
 #include <numeric>
 #include <queue>
@@ -106,6 +109,171 @@ namespace infini
         // 1. 去除冗余的算子（例如，两个相邻的算子都是 transpose 算子，且做的是相反的操作，可以将其全部删除）
         // 2. 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
         // =================================== 作业 ===================================
+
+        if(!this->topo_sort()) 
+        {
+            return;
+        }
+
+        int n_op = this->ops.size();
+        for(int i = 0 ; i < n_op ; ++ i) 
+        {
+            auto op = ops[i];
+            // 处理 transpose
+            if(op->getOpType() == OpType::Transpose)
+            {
+                auto op_trans = std::dynamic_pointer_cast<TransposeObj>(op);
+                auto input = op->getInputs(0);
+                auto pre_op = input->getSource();
+                if(pre_op && pre_op->getOpType() == OpType::Transpose && input->getTargets().size() == 1)
+                {
+                    // 转回 TransposeObj 的智能指针，以便使用 getPermute() 方法
+                    auto pre_op_trans = std::dynamic_pointer_cast<TransposeObj>(pre_op);
+                    auto pre_input = pre_op->getInputs(0);
+                    auto perm = op_trans->getPermute();
+                    bool flag = true;
+                    for(size_t j = 0 ; j < perm.size() ; ++ j)
+                    {
+                        perm[j] = pre_op_trans->getPermute()[perm[j]];
+                        // 检查两次 transpose 是否抵消，抵消相当于没 transpose
+                        if(perm[j] != int(j)) 
+                        {
+                            flag = false;
+                            // 这里不要 break，后续 false 可以做算子融合
+                            // break;
+                        }
+                    }
+                    // 这里为什么直接断掉 pre_op ?
+                    // 因为不管后续两个 transpose 是否相互抵消，都不需要连接这个算子了
+                    pre_input->removeTarget(pre_op);
+
+                    if(flag) // 两次 transpose 互相抵消，应该将两个算子全部删除
+                    {
+                        // 遍历后继算子
+                        for(auto succ : op->getSuccessors())
+                        {
+                            succ->replaceInput(op->getOutput(), pre_input);
+                            pre_input->addTarget(succ);
+                        }
+                        this->removeTensor(op->getOutput());
+                    }
+                    else // 否则将两个 transpose 合并为一个
+                    {
+                        auto new_op = make_ref<TransposeObj>(this, pre_input, op->getOutput(), perm);
+                        this->addOperatorAndConnect(new_op);
+                    }
+
+                    // 遍历上一个 transpose op 的前驱算子，去掉其作为后继
+                    for(auto pred : pre_op->getPredecessors())
+                    {
+                        pred->removeSuccessors(pre_op);
+                    }
+
+                    // 遍历当前 transpose op 的后继算子，去掉其作为前驱
+                    for(auto succ : op->getSuccessors())
+                    {
+                        succ->removePredecessors(op);
+                    }
+                    
+                    this->removeTensor(input);
+                    this->removeOperator(op);
+                    this->removeOperator(pre_op);
+
+                    i -= 2;
+                    n_op -= 2;
+                    continue;
+                }
+            }
+            
+            // 处理 matmul
+            if(op->getOpType() == OpType::MatMul) 
+            {
+                auto op_matmul = std::dynamic_pointer_cast<MatmulObj>(op);
+                auto A = op->getInputs(0), B = op->getInputs(1);
+                auto pre_op_A = A->getSource(), pre_op_B = B->getSource();
+                if(pre_op_A && pre_op_A->getOpType() == OpType::Transpose && A->getTargets().size() == 1)
+                {
+                    auto pre_op_trans_A = std::dynamic_pointer_cast<TransposeObj>(pre_op_A);
+                    auto perm = pre_op_trans_A->getPermute();
+
+                    // 检查是否只有最后两个维度有交换
+                    bool flag = true;
+                    for(size_t j = 0 ; j < perm.size() - 2 ; ++ j)
+                    {
+                        if(perm[j] != int(j)) 
+                        {
+                            flag = false;
+                            break;
+                        }
+                    }
+                    // 不满足条件
+                    if(!flag || perm[perm.size() - 2] != int(perm.size() - 1) ||
+                    perm[perm.size() - 1] != int(perm.size() - 2))
+                    {
+                        continue;
+                    }
+                        
+                    // 满足条件，删除当前 trans_op 并融合到 matmul
+                    auto pre_input = pre_op_A->getInputs(0);
+                    op_matmul->setTransA(!op_matmul->getTransA());
+                    op_matmul->removePredecessors(pre_op_A);
+                    for(auto pre_pre : pre_op_A->getPredecessors())
+                    {
+                        pre_pre->removeSuccessors(pre_op_A);
+                        pre_pre->addSuccessors(op);
+                        op->addPredecessors(pre_pre);
+                    }
+                    pre_input->removeTarget(pre_op_A);
+                    pre_input->addTarget(op);
+                    op_matmul->inputs[0] = pre_input;
+                    this->removeOperator(pre_op_A);
+                    this->removeTensor(A);
+                    i --;
+                    n_op --;
+                }
+
+                if(pre_op_B && pre_op_B->getOpType() == OpType::Transpose && B->targets.size() == 1)
+                {
+                    auto pre_op_trans_B = std::dynamic_pointer_cast<TransposeObj>(pre_op_B);
+                    auto perm = pre_op_trans_B->getPermute();
+
+                    // 检查是否只有最后两个维度有交换
+                    bool flag = true;
+                    for(size_t j = 0 ; j < perm.size() - 2 ; ++ j)
+                    {
+                        if(perm[j] != int(j)) 
+                        {
+                            flag = false;
+                            break;
+                        }
+                    }
+                    // 不满足条件
+                    if(!flag || perm[perm.size() - 2] != int(perm.size() - 1) ||
+                    perm[perm.size() - 1] != int(perm.size() - 2))
+                    {
+                        continue;
+                    }
+                        
+                    // 满足条件，删除当前 trans_op 并融合到 matmul
+                    auto pre_input = pre_op_B->getInputs(0);
+                    op_matmul->setTransB(!op_matmul->getTransB());
+                    op_matmul->removePredecessors(pre_op_B);
+                    for(auto pre_pre : pre_op_B->getPredecessors())
+                    {
+                        pre_pre->removeSuccessors(pre_op_B);
+                        pre_pre->addSuccessors(op);
+                        op->addPredecessors(pre_pre);
+                    }
+                    pre_input->removeTarget(pre_op_B);
+                    pre_input->addTarget(op);
+                    op_matmul->inputs[1] = pre_input;
+                    this->removeOperator(pre_op_B);
+                    this->removeTensor(B);
+                    i --;
+                    n_op --;
+                }                
+            }
+        }
     }
 
     Tensor GraphObj::getTensor(int fuid) const
@@ -152,6 +320,21 @@ namespace infini
         // TODO：利用 allocator 给计算图分配内存
         // HINT: 获取分配好的内存指针后，可以调用 tensor 的 setDataBlob 函数给 tensor 绑定内存
         // =================================== 作业 ===================================
+
+        int n = this->tensors.size();
+        vector<size_t> offsets(n);
+        for(int i = 0 ; i < n ; i ++)
+        {
+            size_t size = this->tensors[i]->getBytes();
+            offsets[i] = this->allocator.alloc(size);
+        }
+        auto hptr = this->allocator.getPtr();
+        for(int i = 0 ; i < n ; i ++)
+        {
+            Blob blob = make_ref<BlobObj>(this->runtime, hptr + offsets[i]);
+            this->tensors[i]->setDataBlob(blob);
+        }
+
 
         allocator.info();
     }
