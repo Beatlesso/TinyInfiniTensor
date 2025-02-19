@@ -60,6 +60,7 @@ namespace infini
         // TODO: 设计一个算法来回收内存
         // =================================== 作业 ===================================
         
+        this->used -= size;
         if(this->peak - size == addr)
         {
             this->peak -= size;
@@ -72,9 +73,23 @@ namespace infini
             size_t l = it->first, r = it->first + it->second;
             if(addr + size == l)
             {
-                this->free_blocks[addr] = it->second + size;
-                this->free_blocks.erase(it);
-                return;
+                if(it != this->free_blocks.begin()) 
+                {
+                    auto pre_it = it;
+                    pre_it --;
+                    size_t pre_l = it->first, pre_r = it->first + it->second;
+                    if(addr == pre_r) 
+                    {
+                        this->free_blocks[pre_l] = pre_it->second + size + it->second;
+                        return;
+                    }
+                }
+                else
+                {
+                    this->free_blocks[addr] = it->second + size;
+                    this->free_blocks.erase(it);
+                    return;
+                }
             }
         }
         if(it != this->free_blocks.begin()) 
