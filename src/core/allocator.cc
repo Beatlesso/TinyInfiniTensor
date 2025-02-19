@@ -66,22 +66,27 @@ namespace infini
             return;
         }
 
-        for(auto it = this->free_blocks.begin() ; it != this->free_blocks.end() ; it ++)
+        auto it = this->free_blocks.lower_bound(addr);
+        if(it != this->free_blocks.end())
         {
             size_t l = it->first, r = it->first + it->second;
             if(addr + size == l)
             {
-                this->free_blocks[addr] = r;
+                this->free_blocks[addr] = it->second + size;
                 this->free_blocks.erase(it);
                 return;
             }
+        }
+        if(it != this->free_blocks.begin()) 
+        {
+            it --;
+            size_t l = it->first, r = it->first + it->second;
             if(addr == r) 
             {
-                this->free_blocks[l] = r + size;
+                this->free_blocks[l] = it->second + size;
                 return;
             }
         }
-
         this->free_blocks[addr] = size;
     }
 
